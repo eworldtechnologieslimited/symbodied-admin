@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Search, Bell, Plus, X, Pencil, Trash2, MapPin, Calendar, Users } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Search, Bell, Plus, X, Pencil, Trash2, MapPin, Calendar, Users, ImagePlus } from "lucide-react";
 import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -22,6 +22,7 @@ type EventRow = {
   slots: number | null;
   created_at: string | null;
   status: string;
+  flyer_url: string | null;
   author: string | null;
 };
 
@@ -34,6 +35,8 @@ type EventForm = {
   slots: string;
   status: string;
 };
+
+const MAX_FLYER_BYTES = 5 * 1024 * 1024;
 
 type StatusFilter = "all" | "pending" | "approved" | "rejected";
 
@@ -55,14 +58,18 @@ export default function AdminEventsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<EventForm>(emptyForm);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [flyerFile, setFlyerFile] = useState<File | null>(null);
+  const [flyerPreview, setFlyerPreview] = useState<string | null>(null);
+  const [uploadingFlyer, setUploadingFlyer] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  type RawEvent = { id: string; name: string; theme: string | null; venue: string | null; location: string | null; date: string | null; slots: number | null; created_at: string | null; status: string; profiles?: { first_name: string | null; last_name: string | null } | { first_name: string | null; last_name: string | null }[] | null };
+  type RawEvent = { id: string; name: string; theme: string | null; venue: string | null; location: string | null; date: string | null; slots: number | null; created_at: string | null; status: string; flyer_url: string | null; profiles?: { first_name: string | null; last_name: string | null } | { first_name: string | null; last_name: string | null }[] | null };
 
   const load = () => {
     const supabase = createClient();
     supabase
       .from("events")
-      .select("id, name, theme, venue, location, date, slots, created_at, status, profiles(first_name, last_name)")
+      .select("id, name, theme, venue, location, date, slots, created_at, status, flyer_url, profiles(first_name, last_name)")
       .order("created_at", { ascending: false })
       .then(({ data }) => {
         setRows(
@@ -81,21 +88,49 @@ export default function AdminEventsPage() {
     createClient().auth.getUser().then(({ data: { user } }) => { if (user) setCurrentUserId(user.id); });
   }, []);
 
-  const openCreate = () => { setEditingId(null); setForm(emptyForm); setShowModal(true); };
+  const openCreate = () => { setEditingId(null); setForm(emptyForm); setFlyerFile(null); setFlyerPreview(null); setShowModal(true); };
   const openEdit = (r: EventRow) => {
     setEditingId(r.id);
     setForm({ name: r.name, theme: r.theme ?? "", venue: r.venue ?? "", location: r.location ?? "", date: r.date ? r.date.slice(0, 10) : "", slots: r.slots != null ? String(r.slots) : "", status: r.status });
+    setFlyerFile(null);
+    setFlyerPreview(r.flyer_url ?? null);
     setShowModal(true);
   };
 
   const f = (k: keyof EventForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm((prev) => ({ ...prev, [k]: e.target.value }));
 
+  const handleFlyerChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { toast.error("Please choose an image file."); return; }
+    if (file.size > MAX_FLYER_BYTES) { toast.error("Flyer image must be smaller than 5MB."); return; }
+    setFlyerFile(file);
+    setFlyerPreview(URL.createObjectURL(file));
+  };
+
+  const removeFlyer = () => { setFlyerFile(null); setFlyerPreview(null); };
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSaving(true);
     const supabase = createClient();
-    const payload = { name: form.name, theme: form.theme || null, venue: form.venue || null, location: form.location || null, date: form.date || null, slots: form.slots ? parseInt(form.slots) : null, status: form.status };
+
+    let flyer_url = flyerPreview && !flyerFile ? flyerPreview : null;
+    if (flyerFile) {
+      setUploadingFlyer(true);
+      const body = new FormData();
+      body.append("file", flyerFile);
+      body.append("folder", "event-flyers");
+      const res = await fetch("/api/admin/upload", { method: "POST", body });
+      setUploadingFlyer(false);
+      if (!res.ok) { toast.error("Failed to upload flyer image."); setSaving(false); return; }
+      const data = await res.json();
+      flyer_url = data.url;
+    }
+
+    const payload = { name: form.name, theme: form.theme || null, venue: form.venue || null, location: form.location || null, date: form.date || null, slots: form.slots ? parseInt(form.slots) : null, status: form.status, flyer_url };
     const { error } = editingId
       ? await supabase.from("events").update(payload).eq("id", editingId)
       : await supabase.from("events").insert({ ...payload, user_id: currentUserId });
@@ -196,8 +231,19 @@ export default function AdminEventsPage() {
                   {filtered.map((r) => (
                     <tr key={r.id} className="hover:bg-ink-100 dark:hover:bg-[#1b2d20] transition-colors">
                       <td className={`${td} font-semibold text-ink dark:text-[#dceee3] max-w-52`}>
-                        <div className="line-clamp-1">{r.name}</div>
-                        {r.theme && <Badge tone="neutral" size="sm" className="mt-1">{r.theme}</Badge>}
+                        <div className="flex items-center gap-3">
+                          {r.flyer_url ? (
+                            <img src={r.flyer_url} alt="" className="h-10 w-10 rounded-lg object-cover border border-ink-200 dark:border-[#263a2b] shrink-0" />
+                          ) : (
+                            <div className="h-10 w-10 rounded-lg bg-ink-100 dark:bg-[#1b2d20] border border-ink-200 dark:border-[#263a2b] flex items-center justify-center shrink-0">
+                              <ImagePlus size={14} className="text-ink-400" />
+                            </div>
+                          )}
+                          <div>
+                            <div className="line-clamp-1">{r.name}</div>
+                            {r.theme && <Badge tone="neutral" size="sm" className="mt-1">{r.theme}</Badge>}
+                          </div>
+                        </div>
                       </td>
                       <td className={td}>{r.author ?? "Admin"}</td>
                       <td className={td}>
@@ -253,6 +299,30 @@ export default function AdminEventsPage() {
               <button onClick={() => setShowModal(false)} className="text-ink-400 dark:text-[#4d6356] hover:text-ink dark:hover:text-[#dceee3] transition-colors"><X size={20} /></button>
             </div>
             <form onSubmit={handleSubmit} className="p-5 flex flex-col gap-4">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-semibold text-ink dark:text-[#dceee3] font-sans">Event Flyer</label>
+                <div className="flex items-center gap-4">
+                  {flyerPreview ? (
+                    <img src={flyerPreview} alt="Flyer preview" className="h-20 w-20 rounded-lg object-cover border border-ink-200 dark:border-[#263a2b]" />
+                  ) : (
+                    <div className="h-20 w-20 rounded-lg bg-ink-100 dark:bg-[#1b2d20] border border-dashed border-ink-200 dark:border-[#263a2b] flex items-center justify-center">
+                      <ImagePlus size={20} className="text-ink-400" />
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-2">
+                    <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFlyerChange} />
+                    <Button type="button" variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
+                      {flyerPreview ? "Change image" : "Upload image"}
+                    </Button>
+                    {flyerPreview && (
+                      <button type="button" onClick={removeFlyer} className="text-xs text-error font-sans text-left hover:underline">
+                        Remove image
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <p className="text-xs text-ink-500 dark:text-[#668074] font-sans">Shown as the cover image on the public event card. PNG or JPG, up to 5MB.</p>
+              </div>
               <Input label="Event Name" value={form.name} onChange={f("name")} required placeholder="e.g. Community Harvest Festival" />
               <Input label="Theme" value={form.theme} onChange={f("theme")} placeholder="Optional theme or tagline" />
               <div className="grid grid-cols-2 gap-4">
@@ -271,8 +341,8 @@ export default function AdminEventsPage() {
               </div>
               <div className="flex gap-3 justify-end pt-1">
                 <Button type="button" variant="ghost" onClick={() => setShowModal(false)}>Cancel</Button>
-                <Button type="submit" variant="primary" loading={saving} leadingIcon={editingId ? <Pencil size={15} /> : <Plus size={15} />}>
-                  {editingId ? "Save Changes" : "Create Event"}
+                <Button type="submit" variant="primary" loading={saving} disabled={saving} leadingIcon={editingId ? <Pencil size={15} /> : <Plus size={15} />}>
+                  {uploadingFlyer ? "Uploading flyer…" : editingId ? "Save Changes" : "Create Event"}
                 </Button>
               </div>
             </form>

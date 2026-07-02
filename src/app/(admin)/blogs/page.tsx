@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Search, Bell, Plus, X, Pencil, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Search, Bell, Plus, X, Pencil, Trash2, ImagePlus } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +34,8 @@ type BlogForm = {
 
 type StatusFilter = "all" | "pending" | "approved" | "rejected" | "published";
 
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
 const CATEGORIES = ["Agriculture", "Medicine", "Technology", "Textile", "Community", "Education", "Other"];
 const STATUS_OPTIONS = ["draft", "pending", "approved", "published", "rejected"];
 const STATUS_FILTERS: StatusFilter[] = ["all", "pending", "approved", "published", "rejected"];
@@ -55,6 +57,10 @@ export default function AdminBlogsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<BlogForm>(emptyForm);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   type RawBlog = { id: string; title: string; category: string | null; excerpt: string | null; content: string | null; image_url: string | null; created_at: string | null; status: string; profiles?: { first_name: string | null; last_name: string | null } | { first_name: string | null; last_name: string | null }[] | null };
 
@@ -81,21 +87,56 @@ export default function AdminBlogsPage() {
     createClient().auth.getUser().then(({ data: { user } }) => { if (user) setCurrentUserId(user.id); });
   }, []);
 
-  const openCreate = () => { setEditingId(null); setForm(emptyForm); setShowModal(true); };
+  const openCreate = () => { setEditingId(null); setForm(emptyForm); setImageFile(null); setImagePreview(null); setShowModal(true); };
   const openEdit = (r: BlogRow) => {
     setEditingId(r.id);
     setForm({ title: r.title, category: r.category ?? "Agriculture", excerpt: r.excerpt ?? "", content: r.content ?? "", image_url: r.image_url ?? "", status: r.status });
+    setImageFile(null);
+    setImagePreview(r.image_url ?? null);
     setShowModal(true);
   };
 
   const f = (k: keyof BlogForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
     setForm((prev) => ({ ...prev, [k]: e.target.value }));
 
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { toast.error("Please choose an image file."); return; }
+    if (file.size > MAX_IMAGE_BYTES) { toast.error("Cover image must be smaller than 5MB."); return; }
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
+  };
+
+  const removeImage = () => { setImageFile(null); setImagePreview(null); setForm((prev) => ({ ...prev, image_url: "" })); };
+
+  const handleImageUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const url = e.target.value;
+    setImageFile(null);
+    setForm((prev) => ({ ...prev, image_url: url }));
+    setImagePreview(url || null);
+  };
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSaving(true);
     const supabase = createClient();
-    const payload = { title: form.title, category: form.category, excerpt: form.excerpt || null, content: form.content || null, image_url: form.image_url || null, status: form.status };
+
+    let image_url = form.image_url || null;
+    if (imageFile) {
+      setUploadingImage(true);
+      const body = new FormData();
+      body.append("file", imageFile);
+      body.append("folder", "blog-covers");
+      const res = await fetch("/api/admin/upload", { method: "POST", body });
+      setUploadingImage(false);
+      if (!res.ok) { toast.error("Failed to upload cover image."); setSaving(false); return; }
+      const data = await res.json();
+      image_url = data.url;
+    }
+
+    const payload = { title: form.title, category: form.category, excerpt: form.excerpt || null, content: form.content || null, image_url, status: form.status };
     const { error } = editingId
       ? await supabase.from("blogs").update(payload).eq("id", editingId)
       : await supabase.from("blogs").insert({ ...payload, user_id: currentUserId });
@@ -243,7 +284,30 @@ export default function AdminBlogsPage() {
                   </select>
                 </div>
               </div>
-              <Input label="Cover Image URL" value={form.image_url} onChange={f("image_url")} placeholder="https://..." type="url" />
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-semibold text-ink dark:text-[#dceee3] font-sans">Cover Image</label>
+                <div className="flex items-center gap-4">
+                  {imagePreview ? (
+                    <img src={imagePreview} alt="Cover preview" className="h-20 w-20 rounded-lg object-cover border border-ink-200 dark:border-[#263a2b]" />
+                  ) : (
+                    <div className="h-20 w-20 rounded-lg bg-ink-100 dark:bg-[#1b2d20] border border-dashed border-ink-200 dark:border-[#263a2b] flex items-center justify-center">
+                      <ImagePlus size={20} className="text-ink-400" />
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-2">
+                    <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
+                    <Button type="button" variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
+                      {imagePreview ? "Change image" : "Upload image"}
+                    </Button>
+                    {imagePreview && (
+                      <button type="button" onClick={removeImage} className="text-xs text-error font-sans text-left hover:underline">
+                        Remove image
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <Input value={form.image_url} onChange={handleImageUrlChange} placeholder="Or paste an image URL…" type="url" />
+              </div>
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-semibold text-ink dark:text-[#dceee3] font-sans">Excerpt <span className="font-normal text-ink-400 dark:text-[#4d6356]">(shown on listing)</span></label>
                 <textarea value={form.excerpt} onChange={f("excerpt")} placeholder="Brief summary shown on the blog listing page…" rows={2} className={ta} />
@@ -254,8 +318,8 @@ export default function AdminBlogsPage() {
               </div>
               <div className="flex gap-3 justify-end pt-1">
                 <Button type="button" variant="ghost" onClick={() => setShowModal(false)}>Cancel</Button>
-                <Button type="submit" variant="primary" loading={saving} leadingIcon={editingId ? <Pencil size={15} /> : <Plus size={15} />}>
-                  {editingId ? "Save Changes" : "Publish Blog"}
+                <Button type="submit" variant="primary" loading={saving} disabled={saving} leadingIcon={editingId ? <Pencil size={15} /> : <Plus size={15} />}>
+                  {uploadingImage ? "Uploading image…" : editingId ? "Save Changes" : "Publish Blog"}
                 </Button>
               </div>
             </form>
